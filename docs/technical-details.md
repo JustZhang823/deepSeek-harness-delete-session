@@ -1,0 +1,161 @@
+# 技术说明
+
+[返回使用指南](../README.md) · [插件源码](../dph-plugin-delete-session/)
+
+本文说明删除的前置条件、数据边界、错误处理与 Host 安全检查。安装及日常使用见[仓库首页](../README.md)。
+
+## 删除前置条件
+
+删除操作只有在以下条件全部满足时才会执行：
+
+1. **Host 插件已激活**：`webServer`、`sessionPersistence` 与 `connection` 服务可用。
+2. **会话存在**：`sessionPersistence.stat(sessionId)` 能找到该会话。
+3. **已加载的会话可安全释放**：空闲 Agent 允许删除，包括当前正在查看的会话。Host 必须能够通过受支持的 Agent 生命周期流程排空并关闭日志写入器、移除 Agent / Session，然后取得持久化层的独占写入权；无法安全完成时拒绝删除并保留日志。
+4. **会话没有运行中的工作**：`workspace/session-activity` 返回空列表。该检查覆盖进行中的回合、子代理、后台任务和计划任务，与归档使用的检查一致。
+5. **会话已有落盘日志**：`sessionPersistence.stat()` 返回 `location`；未落盘的 pending 会话会被拒绝。
+6. **存储布局受支持**：`location.kind === "jsonl"`，日志文件名为 `session.jsonl`、`session.vN.jsonl`（可带 `.zstd`），且日志所在目录的叶子名等于会话 ID。插件不会猜测其他后端的删除方式。
+7. **用户发起的删除**：默认确认模式下在 Client 勾选确认；已保存免确认偏好时，用户从菜单直接提交。Host 两种情况下都必须收到 `confirm: true`。
+8. **可信页面且令牌有效**：HTTP 页面通过同源校验；桌面代理请求缺少 `Origin` 与 `Sec-Fetch-Site` 时，必须由 Host 校验登录 Cookie 并确认为浏览器 Peer。两种请求均须通过 `Host` 校验并携带当前进程令牌。
+
+> 删除**不会**自动停止正在运行的会话或子代理。这样做是为了避免把「删除」变成隐式终止工作。需要停止时，请使用现有的停止/归档流程，再执行删除。
+
+---
+
+## 数据与关联消息
+
+删除以「会话日志目录」为边界。Host 先安全释放已加载的空闲会话，取得持久化层的独占写入权并重新检查活动状态，然后删除不可恢复的日志，再清理可重建/可校正的派生元数据。完成后关闭独占写入租约。
+
+### 会被永久删除
+
+| 数据 | 说明 |
+|---|---|
+| 会话日志目录 | 会话专属目录下的 `session.jsonl` / `session.vN.jsonl` / `session.vN.jsonl.zstd` 以及 `session.lock`。 |
+| 全部消息 | 用户消息、助手消息、系统提示、推理文本、工具调用与工具结果。 |
+| 检查点与历史格式 | 同一会话目录中保留的历史格式版本、压缩帧与检查点数据。 |
+| 派生投影缓存 | 通过 `storageDomain` 的 `session_projcache.sessions` 表删除该会话的缓存记录；不会误删其他会话。 |
+| 工作区归属 | 从所有工作区的 `sessionIds` 中移除该会话。 |
+| 归档与置顶 | 从 `archivedSessionIds`、`pinnedSessionIds` 中移除该会话；归档/置顶记录不会留下悬空 ID。 |
+| 侧边栏行 | Host 发出 `api-session/removed`，已连接的 Client 会移除该行。 |
+
+### 会保留
+
+| 数据 | 原因 |
+|---|---|
+| 子会话及其日志 | 插件只删除所选会话。子会话会保留，但它们指向该会话的父级链接会缺失。 |
+| 附件对象 | DSH 附件按内容寻址并可能被多个会话共享；插件不会删除可能仍被其他会话引用的附件。 |
+| 工作目录本身 | 删除会话不会删除项目目录或其中的文件。 |
+| 第三方派生数据 | 例如第三方费用/统计插件自己的账本。它们不属于会话管理的删除边界。 |
+| 全文搜索索引 | `session-query` 的 SQLite 索引是派生数据，会在下一次搜索/重启时根据持久化会话列表自动校正，不需要用户手工处理。 |
+
+### 删除顺序
+
+已加载会话的释放先于文件删除：只调用已识别的 Agent 生命周期拆卸流程，确保写入器已排空、关闭且 Agent / Session 已移除；不会仅销毁作用域后就假定写入器已关闭。取得独占持久化写入权并重新确认无活动后，才进入以下删除步骤。
+
+1. 清理派生投影缓存：缓存可重建，即使随后日志删除失败，也会在下次打开会话时重建。
+2. 删除会话日志目录：这是不可恢复的步骤。若它失败，工作区/归档/置顶尚未被改动，尚未删除的日志仍保留；Agent 释放事件可能使会话行暂时消失，可刷新列表后重新打开或重试。
+3. 清理工作区归属、归档、置顶和发送移除事件：这些操作是幂等的；失败不会让已删除的会话数据回来，会以 `warnings` 返回，并在下次重启时自动校正。
+
+---
+
+## 失败场景与预期结果
+
+| 场景 | 返回/表现 | 数据结果 |
+|---|---|---|
+| 会话不存在 | `NOT_FOUND`，对话框提示「会话已不存在」 | 不删除任何内容。 |
+| 会话被 Agent 加载，但没有运行中的工作 | 确认模式显示释放提示；也支持已启用的免确认删除，无须切换会话或重启 | 先安全释放 Agent / Session 及写入器，再取得独占写入权并执行删除。 |
+| 会话有运行中的回合/子代理/后台任务/计划任务 | `ACTIVE`，对话框列出活动项 | 不删除任何内容；日志和元数据都保留。 |
+| 会话正在维护，或确认期间出现新活动 | `ACTIVE`，停止或等待该工作完成后重新检查 | 不删除会话日志。 |
+| 生命周期版本不受支持，或 Host 不提供所需的释放/独占写入接口 | `AGENT_RELEASE_UNAVAILABLE`，不继续删除 | 保留会话日志。 |
+| 释放失败、无法取得独占写入权，或会话在删除期间被重新加载 | `AGENT_RELEASE_FAILED`，提示无法安全释放或锁定 | 保留会话日志；若会话行因 Agent 释放暂时消失，可刷新列表后重新打开或重试。 |
+| 同一会话已有删除请求正在执行 | `DELETE_IN_PROGRESS` | 不启动第二次删除；等待现有请求完成。 |
+| 会话尚未落盘 | `NOT_MATERIALIZED` | 不删除任何内容。 |
+| 存储后端不是 JSONL，或目录名/文件名不符合约定 | `UNSUPPORTED_STORAGE` / `UNEXPECTED_LAYOUT` | 拒绝删除，不猜测路径。 |
+| 确认模式下未勾选确认，或 Host 未收到 `confirm: true` | Client 显示勾选提醒并聚焦确认项；Host 拒绝未确认请求，返回 `CONFIRMATION_REQUIRED` | 不执行删除；免确认偏好不因本次未确认而改变。 |
+| 删除成功，但免确认偏好保存失败 | 同时显示删除成功和设置未保存提示 | 删除结果保留，后续仍按原来的已保存设置处理。 |
+| 页面令牌过期（例如 Host 热重载后） | Client 自动刷新一次令牌；仍失败则提示刷新页面 | 不执行删除。 |
+| 页面来源不可信，或桌面代理登录凭据无效 | `FORBIDDEN_ORIGIN`，提示来源或桌面授权校验失败；不会反复刷新令牌 | 不执行删除；重复刷新页面不能修复来源配置问题。 |
+| 缺少令牌 | `FORBIDDEN_TOKEN`，Client 获取新令牌后重试一次 | 未通过校验时不执行删除。 |
+| 无法从 Host 获取令牌 | `TOKEN_UNAVAILABLE`，单独提示令牌获取失败 | 不执行删除；检查 Host 插件状态。 |
+| 文件被占用、权限不足、Windows 文件锁、磁盘 I/O 失败 | `DELETE_FAILED`，包含原因；Client 显示错误 | **会话日志可能未被删除**；工作区/归档/置顶尚未清理（因为日志删除在它们之前）；派生投影缓存可能已清除，但会在下次打开会话时重建。排除问题后可重试。 |
+| 日志删除成功，但工作区/归档/置顶/缓存清理失败 | 仍返回成功，附带 `warnings` | 会话数据已永久删除；残留元数据在下次重启时校正，或按提示刷新。 |
+| 删除成功，但关闭独占写入租约失败 | 成功并附带 `WRITE_LEASE_RELEASE_FAILED` 警告 | 会话日志已经删除；保留警告中的原因供排查，不把此警告当作删除未执行。 |
+| 删除完成后目录仍存在 | 成功并附带 `VERIFY_FAILED` 警告 | 需要检查文件系统权限/锁；会话可能仍可被外部工具看到。 |
+
+### 预期成功结果
+
+- 会话从侧边栏消失；
+- 无法再打开、恢复、分叉或继续该会话；
+- 会话日志目录不存在；
+- 工作区 `sessionIds`、归档集合、置顶集合中不再有该 ID；
+- 投影缓存记录被删除；
+- 其他会话、子会话、附件和工作目录不受影响。
+
+---
+
+## 兼容性
+
+- **Web / 桌面客户端**：支持本机 HTTP 页面与桌面 `dsh-app://app/` 页面；桌面代理凭据由 Host 的 `connection.admit()` 验证，且只能使用浏览器 Peer，API/operator Peer 不作为页面授权。
+- **Agent 生命周期**：已加载空闲会话的自动释放适配当前随 Harness 发布的 Cordis / AgentLoop 生命周期元数据结构。结构不受支持时拒绝删除，不用单独销毁作用域代替写入器关闭。「释放会话」指关闭写入器并从运行时注销 Agent / Session；Host 没有公开的按 ID 卸载接口或 AgentHandle 查询接口，创建方生命周期闭包可能保留内存引用，直至所属控制器卸载或 Host 重启，因此不保证立即回收全部堆内存。
+- **macOS / Windows**：只使用 Node `node:fs/promises`、`node:path`、`node:crypto`，不调用 `rm -rf`、PowerShell 或 shell；路径分隔符和 Windows 大小写不敏感目录名分别处理。
+- **Windows 文件锁**：`fs.rm` 使用 `maxRetries: 3` 与 `retryDelay: 100` 重试；仍失败时返回明确错误，不无限重试。
+- **符号链接防护**：日志目录必须是真实目录，不能是符号链接；目录名必须是会话 ID；日志文件名必须匹配受支持的 JSONL 命名。任一不满足即拒绝，避免误删。
+- **存储后端**：只支持 DSH 自带的 JSONL 会话持久化布局（`location.kind === "jsonl"`）。若 DSH 更改会话存储后端，插件会拒绝删除而不是猜测。
+- **无第三方运行时依赖**：Host 只依赖 DSH 注入的服务；Client 只使用页面提供的 React 和 Cordis 服务。
+
+---
+
+## 安全设计
+
+- 插件**不注册专门的 Agent 删除工具**，常规入口是用户发起的界面操作；这不等同于阻止有本机代码执行权限的自动化访问相关服务。
+- 免确认偏好只保存在当前客户端/浏览器；初始关闭，仅在用户勾选该选项并完成一次已确认的成功删除后保存。免确认不会跳过下列 Host 校验。
+- Host 路由要求：
+  - `Host` 与本机绑定地址一致（支持 `localhost` / `127.0.0.1` / `[::1]` 别名）；
+  - 浏览器请求中，`Origin` 的协议和地址须与请求一致，`Sec-Fetch-Site` 如存在须为 `same-origin`；
+  - 桌面代理请求同时缺少 `Origin` 与 `Sec-Fetch-Site` 时，须由 `connection.admit(req)` 验证 Host 签发的 Cookie，返回的 Peer 必须是 `connection.browserPeer`；缺失、失效凭据或不可用的授权服务均拒绝，不以 Cookie 的存在本身作为授权；
+  - 每个 Host 进程随机生成的 32 字节令牌；
+  - `Content-Type: application/json`；
+  - 请求体上限 64 KiB；
+  - `confirm: true`。
+- 会话 ID 经过白名单校验，且必须与日志目录叶子名一致；拒绝路径穿越和任意路径删除。
+- 删除前排空并关闭已加载空闲 Agent 的写入器、移除 Agent / Session，取得持久化层独占写入权后再次检查活动状态。实际运行或维护中的会话仍会阻止删除；租约在操作结束时关闭。
+
+---
+
+## 卸载
+
+在 Plugin Manager 中禁用或卸载 **Delete sessions / 删除会话** 即可。卸载只移除菜单和路由，不会恢复已经删除的会话，也不会删除其他会话数据。
+
+---
+
+## 文件说明
+
+| 文件 | 作用 |
+|---|---|
+| [`index.js`](../dph-plugin-delete-session/index.js) | Host 半部分：删除服务、`/api/dsh-session-delete` 同源路由、令牌、计划/删除接口。 |
+| [`session-files.js`](../dph-plugin-delete-session/session-files.js) | 路径安全校验与 `fs.rm` 删除实现。 |
+| [`agent-lifecycle.js`](../dph-plugin-delete-session/agent-lifecycle.js) | 已加载空闲会话的生命周期识别、安全释放与写入器关闭适配。 |
+| [`client.js`](../dph-plugin-delete-session/client.js) | Client 半部分：会话菜单项、确认对话框、免确认偏好与恢复入口、非模态反馈、令牌获取、中英文文案。 |
+| [`cordis.patch.yml`](../dph-plugin-delete-session/cordis.patch.yml) | bundle 的 Loader patch，插入 `dsh-session-delete` 行。 |
+| `locale/en.json`、`locale/zh.json` | 插件管理器显示的标题/描述。 |
+| [`icon.svg`](../dph-plugin-delete-session/icon.svg) | 插件图标。 |
+| [`test/session-files.test.mjs`](../dph-plugin-delete-session/test/session-files.test.mjs) | 路径安全与目录删除单元测试。 |
+| [`test/service.test.mjs`](../dph-plugin-delete-session/test/service.test.mjs) | 删除计划、活动保护、确认与元数据清理测试。 |
+| [`test/bridge.test.mjs`](../dph-plugin-delete-session/test/bridge.test.mjs) | HTTP 同源校验、桌面代理授权与删除令牌回归测试。 |
+| [`test/client.test.mjs`](../dph-plugin-delete-session/test/client.test.mjs) | Client 提示、确认与免确认偏好、非模态反馈及过期令牌重试回归测试。 |
+| [`test/agent-lifecycle.test.mjs`](../dph-plugin-delete-session/test/agent-lifecycle.test.mjs) | Agent 生命周期识别、释放顺序及不支持/失败场景测试。 |
+
+---
+
+## 验证范围
+
+- `index.js`、`agent-lifecycle.js`、`client.js` 语法检查通过。
+- 完整测试 **84/84 通过**（含子测试），覆盖文件/服务、生命周期释放顺序、独占写入保护、桌面代理授权、未授权请求拒绝、免确认偏好、成功后保存、刷新后直接删除、重复点击保护、恢复确认、存储失败回退及非模态反馈。
+- 实际 macOS 桌面验证了菜单、删除预览、空闲会话释放提示、未勾选确认时的提醒，以及默认未勾选的免确认选项。
+- 测试使用临时会话数据验证目录删除和生命周期顺序；未删除真实用户会话，也未在真实用户会话上启用直接删除。
+- Windows 与深色主题尚未现场验证。
+
+在插件目录使用兼容的 Node 运行时运行：
+
+```bash
+node --test test/*.test.mjs
+```
