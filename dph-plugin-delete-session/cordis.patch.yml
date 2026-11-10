@@ -1,0 +1,6 @@
+# Bundle patch for the local delete-session plugin.
+# The Host half provides `sessionDeletion` and the same-origin bridge; the
+# `dsh.client` manifest loads ./client.js as the browser half.
+- insert:
+    - id: dsh-session-delete
+      name: '@local/dsh-session-delete'

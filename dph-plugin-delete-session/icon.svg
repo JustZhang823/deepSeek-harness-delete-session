@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Delete session">
+  <rect width="64" height="64" rx="14" fill="#1f2328"/>
+  <path d="M19 21h26" fill="none" stroke="#f5f5f5" stroke-width="3" stroke-linecap="round"/>
+  <path d="M27 21v-4h10v4" fill="none" stroke="#f5f5f5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M23 25h18l-1.7 25H24.7L23 25Z" fill="#e5484d"/>
+  <path d="M29 31v13M35 31v13" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" opacity="0.9"/>
+  <circle cx="48" cy="48" r="9" fill="#e5484d" stroke="#1f2328" stroke-width="2"/>
+  <path d="M44.5 44.5l7 7M51.5 44.5l-7 7" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

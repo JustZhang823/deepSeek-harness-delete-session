@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Delete sessions",
+    "description": "Permanently delete individual sessions from the sidebar with a review-and-confirm dialog that explains exactly what is removed."
+  }
+}
