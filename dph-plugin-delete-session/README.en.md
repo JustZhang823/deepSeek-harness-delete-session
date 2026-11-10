@@ -1,5 +1,7 @@
 # Delete Session
 
+[中文使用指南](../README.md) · [Technical details (中文)](../docs/technical-details.md) · [Package overview](README.md)
+
 A DeepSeek Harness (DSH) session-management plugin that adds true, irreversible deletion beside the existing **Archive** action.
 
 - **Archive** hides a session from the sidebar. Its log, messages, workspace slot, and archive record stay intact and can be restored.
@@ -30,11 +32,18 @@ This is a local DSH bundle. The Host half provides the deletion service and a sa
 
 ### Recommended: Plugin Manager / agent
 
-Use the absolute package directory:
+Clone the repository, then select its **`dph-plugin-delete-session/` subdirectory**, not the repository root:
 
-```text
-/Users/zhangjiayi/dph-plugin-delete-session
+```bash
+git clone https://github.com/JustZhang823/deepSeek-harness-delete-session.git
 ```
+
+Pass the plugin subdirectory's absolute path as `target`. For example, when the repository is checked out under your `Projects` folder:
+
+| Platform | Example `target` |
+|---|---|
+| macOS | `/Users/<username>/Projects/deepSeek-harness-delete-session/dph-plugin-delete-session` |
+| Windows | `C:\Users\<username>\Projects\deepSeek-harness-delete-session\dph-plugin-delete-session` |
 
 Call Plugin Manager's `install_bundle` with that absolute path as `target`. A successful result contains:
 
@@ -192,7 +201,7 @@ Releasing a loaded session precedes file deletion. Only recognized Agent lifecyc
 
 ## 8. Security
 
-- Deletion is a user action. The plugin registers **no Agent tool**, so the model cannot invoke it.
+- The plugin registers **no dedicated Agent deletion tool**; the normal flow starts from a user action in the UI. This does not prevent automation with local code-execution access from reaching the underlying services.
 - The preference to skip confirmation is local to the current client/browser. It starts disabled and is saved only after the user selects it and completes an acknowledged deletion successfully. It does not bypass any of the Host checks below.
 - The Host route requires the bound Host authority (including loopback aliases). A supplied browser `Origin` must match the request's protocol and authority, and `Sec-Fetch-Site`, when present, must be `same-origin`.
 - When both browser headers are absent, `connection.admit(req)` must validate the Host-issued cookie and return `connection.browserPeer`. Missing/invalid credentials or an unavailable admission service are refused; the mere presence of a cookie is insufficient.
@@ -229,9 +238,16 @@ Disable or uninstall **Delete sessions** in Plugin Manager. Uninstalling removes
 ## 11. Verification status
 
 - JavaScript syntax checks passed for `index.js`, `agent-lifecycle.js`, and `client.js`.
-- Electron's Node runtime ran the full suite with `--test test/*.test.mjs`: 84/84 tests passed, including subtests covering confirmation preferences, saving after success, direct deletion after reload, duplicate-click protection, restoring confirmation, storage-failure fallback, and nonmodal feedback.
-- The currently installed plugin, linked to this source directory, was reloaded by disabling and enabling its component through Plugin Manager and was confirmed running.
-- The actual desktop `dsh-app://app/` page's idle-loaded release notice and Delete preview were verified. In the “嗅觉异常咨询” dialog, clicking **Delete permanently** while unchecked showed a reminder and focused the still-unchecked checkbox without deleting the session. Regression tests cover repeated reminders, clearing the reminder when checked, and submitting once after confirmation.
-- The latest desktop dialog displays the skip-confirmation checkbox and explains that it takes effect after this deletion succeeds. Both checkboxes start unchecked; direct deletion was not enabled or executed on a real user session during verification.
-- No real user session was deleted. Temporary test fixtures verified directory deletion and lifecycle teardown order.
-- Dark theme and Windows have not been tested live.
+- The full test suite passed **84/84 tests**, including subtests covering file/service behavior, lifecycle teardown order, exclusive write ownership, desktop admission, confirmation preferences, saving only after success, direct deletion after reload, duplicate-click protection, restoring confirmation, storage-failure fallback, and nonmodal feedback.
+- The macOS desktop menu, deletion preview, idle-loaded release notice, and unchecked acknowledgement reminder were verified.
+- Both confirmation checkboxes start unchecked. The skip-confirmation option explains that it takes effect only after an acknowledged deletion succeeds.
+- No real user session was deleted, and direct deletion was not enabled on a real user session. Temporary test fixtures verified directory deletion and lifecycle teardown order.
+- Windows and dark theme have not been tested live.
+
+Run the suite from the plugin directory with a compatible Node runtime:
+
+```bash
+node --test test/*.test.mjs
+```
+
+Licensed under the [MIT License](LICENSE).
